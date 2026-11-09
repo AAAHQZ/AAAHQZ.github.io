@@ -1,0 +1,55 @@
+<!DOCTYPE html><html lang="zh-CN" data-theme="cyber" data-palette="1" data-type="split" data-neon="normal"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>AAAHQZ 早报 · 模型网关的两种超时口径 · AAAHQZ</title><meta name="description" content="同一个『超时』在网关层和引擎层是两件事：连接超时、排队超时、首 token 超时必须分开定，否则重试会把后端打穿。"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><!-- 先读偏好再上色，避免深色站闪一下白。
+		     没有本地记录时**用站点默认（cyber）**，不跟随系统偏好（14 票定案）。 --><script>
+			try {
+				const t = localStorage.getItem('aaahqz:theme');
+				const n = localStorage.getItem('aaahqz:neon');
+				if (t) document.documentElement.dataset.theme = t;
+				if (n) document.documentElement.dataset.neon = n;
+			} catch {}
+		</script><link rel="stylesheet" href="/_astro/posts.BDxXMjGk.css"><style>.toc[data-astro-cid-7k3pnqyz]{font-family:var(--font-mono);font-size:var(--fs-small);color:var(--ink-soft)}.toc[data-astro-cid-7k3pnqyz] ol[data-astro-cid-7k3pnqyz]{margin:0;padding-left:0;list-style:none}.toc[data-astro-cid-7k3pnqyz] a[data-astro-cid-7k3pnqyz]{color:var(--ink-soft);text-decoration:none}.toc[data-astro-cid-7k3pnqyz] a[data-astro-cid-7k3pnqyz]:hover{color:var(--accent-briefs)}.article[data-astro-cid-q5fravpf]{max-width:var(--measure);padding:var(--sp-4) 0;margin:0 auto}.main[data-astro-cid-q5fravpf]{min-width:0}.placement-aside[data-astro-cid-q5fravpf]{max-width:var(--measure-wide);gap:var(--sp-4);grid-template-columns:minmax(0,1fr) 14rem;align-items:start;display:grid}.aside[data-astro-cid-q5fravpf]{top:var(--sp-3);border-left:1px solid var(--rule-soft);padding-left:var(--sp-2);position:sticky}.toc-slot[data-astro-cid-q5fravpf]{border-left:1px solid var(--rule-soft);padding-left:var(--sp-2);margin-bottom:var(--sp-3)}.head[data-astro-cid-q5fravpf] h1[data-astro-cid-q5fravpf]{font-family:var(--font-display);font-size:var(--fs-h1);line-height:var(--leading-tight);margin:0 0 var(--sp-2)}.meta[data-astro-cid-q5fravpf]{font-family:var(--font-mono);font-size:var(--fs-small);color:var(--ink-soft);margin:0 0 var(--sp-3)}@media (width<=56rem){.placement-aside[data-astro-cid-q5fravpf]{grid-template-columns:minmax(0,1fr)}.aside[data-astro-cid-q5fravpf]{border-left:none;padding-left:0;position:static}}
+</style></head><body><header class="site-head wrap" data-astro-cid-fzpbxy5g><a class="site-name" href="/" data-astro-cid-fzpbxy5g>AAAHQZ</a><nav class="site-nav" data-astro-cid-fzpbxy5g><a href="/briefs/" data-astro-cid-fzpbxy5g>早报</a><a href="/essays/" data-astro-cid-fzpbxy5g>长文</a><a href="/notes/" data-astro-cid-fzpbxy5g>笔记</a></nav></header><article class="article placement-aside" data-astro-cid-q5fravpf><div class="main" data-astro-cid-q5fravpf><header class="head" data-astro-cid-q5fravpf><h1 data-astro-cid-q5fravpf>AAAHQZ 早报 · 模型网关的两种超时口径</h1><p class="meta" data-astro-cid-q5fravpf>2026-11-01 · 系列：AAAHQZ 早报</p></header><div class="prose" data-astro-cid-q5fravpf><p>今天看到一份网关配置，把所有超时都写成了同一个 <code>30s</code>。这在本地开发时看不出问题，
+在压测时会变成故障放大器——超时不分阶段，重试就会把同一份预算算两遍<a href="https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/">[1]</a>。</p>
+<h2 id="一三种超时不能混用">一、三种超时不能混用</h2>
+<table>
+<thead>
+<tr>
+<th>超时</th>
+<th>计时起点</th>
+<th>超时后引擎状态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>连接超时</td>
+<td>发起 TCP/TLS</td>
+<td>一定没进引擎</td>
+</tr>
+<tr>
+<td>排队超时</td>
+<td>进了引擎的队列</td>
+<td>一定还在排队</td>
+</tr>
+<tr>
+<td>首 token 超时</td>
+<td>出队开始推理</td>
+<td>可能已经在算</td>
+</tr>
+</tbody>
+</table>
+<p>只有第一种能安全重试。第二种重试等于把同一个请求再排一次队——队列长度没变，
+只是多了一次调度开销。第三种最危险：推理可能已经占了 GPU，重试会同时留两份。
+gRPC 的 deadline 模型就是按<strong>整体预算</strong>来管的：连接阶段只是其中一段<a href="https://grpc.io/docs/what-is-grpc/core-concepts/">[2]</a>，
+超时若不区分阶段，重试就会把预算算重。</p>
+<blockquote>
+<p>判断标准很简单：<strong>这个超时发生时，资源已经被占住了吗？</strong>
+占住了就不能靠重试解决，得靠限流和降级。</p>
+</blockquote>
+<h2 id="二一条建议">二、一条建议</h2>
+<p>把超时的名字带上计时范围，比如 <code>queue_timeout_ms</code> 而不是 <code>timeout_ms</code>。
+名字里带上语义，配置评审时能少吵一半。</p>
+<p>配置改完记得跑一遍压测，看重试率是不是和超时率同步上升。</p>
+<hr>
+<h2 id="参考来源">参考来源</h2>
+<p>[1] <a href="https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/">Timeouts, retries, and backoff with jitter — AWS Builders’ Library</a></p>
+<p>[2] <a href="https://grpc.io/docs/what-is-grpc/core-concepts/">gRPC core concepts（Deadlines）</a></p>
+</div></div><aside class="aside" data-astro-cid-q5fravpf><nav class="toc" aria-label="目录" data-astro-cid-7k3pnqyz><ol data-astro-cid-7k3pnqyz><li data-astro-cid-7k3pnqyz><a href="#一三种超时不能混用" data-astro-cid-7k3pnqyz>一、三种超时不能混用</a></li><li data-astro-cid-7k3pnqyz><a href="#二一条建议" data-astro-cid-7k3pnqyz>二、一条建议</a></li><li data-astro-cid-7k3pnqyz><a href="#参考来源" data-astro-cid-7k3pnqyz>参考来源</a></li></ol></nav></aside></article><footer class="site-foot wrap" data-astro-cid-nns7i3if><p class="tagline" data-astro-cid-nns7i3if>AI-Infra, Agent (now), and AGI (future) are Harnessing Quiet Zeal.</p><nav class="site-nav" data-astro-cid-nns7i3if><a href="/briefs/" data-astro-cid-nns7i3if>早报</a><a href="/essays/" data-astro-cid-nns7i3if>长文</a><a href="/notes/" data-astro-cid-nns7i3if>笔记</a></nav><p class="meta" data-astro-cid-nns7i3if>© 2026 AAAHQZ · Astro 构建</p></footer><div class="panel-corner" data-panel hidden data-astro-cid-a2spwjz6><button class="toggle" type="button" aria-expanded="false" aria-controls="theme-panel" data-toggle data-astro-cid-a2spwjz6><span aria-hidden="true" data-astro-cid-a2spwjz6>◐</span><span class="sr-only" data-astro-cid-a2spwjz6>主题设置</span></button><div class="panel" id="theme-panel" hidden data-body data-astro-cid-a2spwjz6><p class="panel-title" data-astro-cid-a2spwjz6>主题</p><div class="choices" role="radiogroup" aria-label="主题" data-astro-cid-a2spwjz6><button type="button" role="radio" data-theme-choice="cyber" data-astro-cid-a2spwjz6>赛博朋克</button><button type="button" role="radio" data-theme-choice="paper" data-astro-cid-a2spwjz6>暖纸</button></div><p class="panel-title" data-astro-cid-a2spwjz6>霓虹强度</p><div class="choices" role="radiogroup" aria-label="霓虹强度" data-astro-cid-a2spwjz6><button type="button" role="radio" data-neon-choice="dim" data-astro-cid-a2spwjz6>弱</button><button type="button" role="radio" data-neon-choice="normal" data-astro-cid-a2spwjz6>中</button><button type="button" role="radio" data-neon-choice="bright" data-astro-cid-a2spwjz6>强</button></div></div></div><script type="module">var e=`aaahqz:theme`,t=`aaahqz:neon`,n=(e,t)=>{try{return localStorage.getItem(e)||t}catch{return t}},r=(e,t)=>{try{localStorage.setItem(e,t)}catch{}};function i(e,t,n){e.querySelectorAll(`[data-${t}-choice]`).forEach(e=>{let r=e.dataset[`${t}Choice`]===n;e.setAttribute(`aria-checked`,r?`true`:`false`),e.classList.toggle(`active`,r)})}document.querySelectorAll(`[data-panel]`).forEach(a=>{a.removeAttribute(`hidden`);let o=a.querySelector(`[data-body]`),s=a.querySelector(`[data-toggle]`);s&&o&&s.addEventListener(`click`,()=>{let e=o.hasAttribute(`hidden`);e?o.removeAttribute(`hidden`):o.setAttribute(`hidden`,``),s.setAttribute(`aria-expanded`,e?`true`:`false`)});let c=n(e,document.documentElement.dataset.theme||`cyber`),l=n(t,document.documentElement.dataset.neon||`normal`);i(a,`theme`,c),i(a,`neon`,l),a.querySelectorAll(`[data-theme-choice]`).forEach(t=>{t.addEventListener(`click`,()=>{let n=t.dataset.themeChoice;document.documentElement.dataset.theme=n,r(e,n),i(a,`theme`,n)})}),a.querySelectorAll(`[data-neon-choice]`).forEach(e=>{e.addEventListener(`click`,()=>{let n=e.dataset.neonChoice;document.documentElement.dataset.neon=n,r(t,n),i(a,`neon`,n)})})});</script></body></html>
